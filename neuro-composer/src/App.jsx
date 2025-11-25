@@ -2,112 +2,11 @@ import React, { useState, useEffect, useRef } from 'react';
 import * as Tone from 'tone';
 import { Play, Square, Download, RefreshCw, Cpu, Activity, Zap, Upload, FileJson, BarChart3, Save, Trash2, FileUp, Music4, Infinity as InfinityIcon, Clock, FolderOpen, FileMusic } from 'lucide-react';
 
-// --- UTILS: MIDI PARSER ---
-class MidiParser {
-  constructor(arrayBuffer) {
-    this.data = new DataView(arrayBuffer);
-    this.offset = 0;
-  }
-  readString(len) { let s = ''; for (let i = 0; i < len; i++) s += String.fromCharCode(this.data.getUint8(this.offset++)); return s; }
-  readUInt32() { const v = this.data.getUint32(this.offset); this.offset += 4; return v; }
-  readUInt16() { const v = this.data.getUint16(this.offset); this.offset += 2; return v; }
-  readUInt8() { return this.data.getUint8(this.offset++); }
-  readVarInt() { let r = 0, b; do { b = this.readUInt8(); r = (r << 7) | (b & 0x7f); } while (b & 0x80); return r; }
-  parse() {
-    if (this.readString(4) !== 'MThd') throw new Error("Invalid MIDI");
-    this.readUInt32(); this.readUInt16();
-    const numTracks = this.readUInt16(); this.readUInt16();
-    let events = [];
-    for (let t = 0; t < numTracks; t++) {
-      if (this.readString(4) !== 'MTrk') break;
-      const len = this.readUInt32(), end = this.offset + len;
-      let time = 0, status = 0;
-      while (this.offset < end) {
-        time += this.readVarInt();
-        let b = this.data.getUint8(this.offset);
-        if (b < 0x80) this.offset--; else { this.offset++; status = b; }
-        const cmd = status & 0xf0;
-        if (cmd === 0x90) {
-          const n = this.readUInt8(), v = this.readUInt8();
-          if (v > 0) events.push({ note: n, velocity: v / 127, time });
-        } else if (cmd === 0x80 || cmd === 0xA0 || cmd === 0xB0 || cmd === 0xE0) { this.readUInt8(); this.readUInt8(); }
-        else if (cmd === 0xC0 || cmd === 0xD0) this.readUInt8();
-        else if (status === 0xFF) { this.readUInt8(); this.offset += this.readVarInt(); }
-      }
-    }
-    events.sort((a, b) => a.time - b.time);
-    const unique = [...new Set(events.map(e => e.note))];
-    return { rawEvents: events.slice(0, 64), stats: { uniqueNotes: unique } };
-  }
-}
-
-// --- UTILS: Pink Noise ---
-class PinkNoise {
-  constructor() {
-    this.max_key = 0x1f; this.key = 0;
-    this.white_values = [Math.random(), Math.random(), Math.random(), Math.random(), Math.random()];
-  }
-  getNext() {
-    const last = this.key; this.key++; if (this.key > this.max_key) this.key = 0;
-    const diff = last ^ this.key; let sum = 0;
-    for (let i = 0; i < 5; i++) { if (diff & (1 << i)) this.white_values[i] = Math.random() * 2 - 1; sum += this.white_values[i]; }
-    return sum / 5;
-  }
-}
-
-// --- CORE: Theory ---
-const THEORY = {
-  scales: { lydian: [0, 2, 4, 6, 7, 9, 11], ionian: [0, 2, 4, 5, 7, 9, 11], aeolian: [0, 2, 3, 5, 7, 8, 10] },
-  getMelodyNotes: (root, s) => {
-    const r = Tone.Frequency(root).toMidi();
-    const int = THEORY.scales[s] || THEORY.scales.ionian;
-    let n = []; for (let o = 1; o < 3; o++) int.forEach(i => n.push(Tone.Frequency(r + i + (o * 12), "midi").toNote()));
-    return n;
-  },
-  getBassNotes: (root, s) => {
-    const r = Tone.Frequency(root).toMidi() - 12;
-    const int = THEORY.scales[s] || THEORY.scales.ionian;
-    let n = []; for (let o = 0; o < 1; o++) int.forEach(i => n.push(Tone.Frequency(r + i + (o * 12), "midi").toNote()));
-    return n;
-  }
-};
-
-// --- AI ENGINE ---
-class CompositionDNA {
-  constructor(len, melNotes, bassNotes, isRand = true) {
-    this.melodyGenes = []; this.harmonyGenes = []; this.fitness = 0; this.feedback = "";
-    if (isRand) {
-      for (let i = 0; i < len; i++) {
-        this.melodyGenes.push({
-          note: melNotes[Math.floor(Math.random() * melNotes.length)],
-          duration: Math.random() > 0.6 ? "2n" : "4n",
-          velocity: 0.3 + (Math.random() * 0.4)
-        });
-        this.harmonyGenes.push(i % 2 === 0 ? {
-          note: bassNotes[Math.floor(Math.random() * bassNotes.length)],
-          type: Math.random() > 0.5 ? "chord" : "arpeggio",
-          velocity: 0.2 + (Math.random() * 0.2)
-        } : null);
-      }
-    }
-  }
-  crossover(p) {
-    const c = new CompositionDNA(this.melodyGenes.length, [], [], false);
-    const m = Math.floor(Math.random() * this.melodyGenes.length);
-    for (let i = 0; i < this.melodyGenes.length; i++) {
-      c.melodyGenes[i] = i > m ? this.melodyGenes[i] : p.melodyGenes[i];
-      c.harmonyGenes[i] = i > m ? this.harmonyGenes[i] : p.harmonyGenes[i];
-    }
-    return c;
-  }
-  mutate(rate, mNotes, bNotes, pn) {
-    for (let i = 0; i < this.melodyGenes.length; i++) {
-      if (Math.random() < rate) this.melodyGenes[i].note = mNotes[Math.floor(Math.random() * mNotes.length)];
-      if (Math.random() < rate) { const n = pn.getNext(); this.melodyGenes[i].velocity = Math.max(0.1, Math.min(0.9, this.melodyGenes[i].velocity + (n * 0.1))); }
-      if (this.harmonyGenes[i] && Math.random() < rate) this.harmonyGenes[i].note = bNotes[Math.floor(Math.random() * bNotes.length)];
-    }
-  }
-}
+// --- IMPORTACIONES DE MÓDULOS (NUEVO) ---
+import { MidiParser } from './utils/MidiParser';
+import { PinkNoise } from './utils/PinkNoise';
+import { THEORY } from './core/Theory';
+import { CompositionDNA } from './core/CompositionDNA';
 
 export default function App() {
   // State
@@ -118,14 +17,14 @@ export default function App() {
   const [bestFitness, setBestFitness] = useState(0);
   const [currentMelody, setCurrentMelody] = useState([]);
   const [feedback, setFeedback] = useState("Sistema Listo");
-  const [logs, setLogs] = useState(["NeuroComposer v14 UI Fix"]);
+  const [logs, setLogs] = useState(["NeuroComposer v14 Modular"]);
   const [timeLeft, setTimeLeft] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
   const [metaData, setMetaData] = useState({ bpm: 60, scale: 'lydian', root: 'F3', structure: ["Intro", "Theme", "Theme", "Outro"], fileName: null });
 
   // Refs
   const engineRef = useRef(null);
-  const pinkNoiseRef = useRef(new PinkNoise());
+  const pinkNoiseRef = useRef(new PinkNoise()); // Usa la clase importada
   const seqRef = useRef(null);
   const abortRef = useRef(false);
   const loopTimeoutRef = useRef(null);
@@ -159,7 +58,7 @@ export default function App() {
 
   // --- EVOLUTION ---
   const calculateFitness = (dna) => {
-    let score = 0, reasons = [];
+    let score = 0;
     dna.melodyGenes.forEach((g, i) => {
       if (i > 0) {
         const prev = Tone.Frequency(dna.melodyGenes[i - 1].note).toMidi();
@@ -187,6 +86,7 @@ export default function App() {
     stopMusic(false); setIsEvolving(true); abortRef.current = false;
     addLog(loop ? `Ciclo Evolutivo (Gen ${generation})` : "Iniciando...");
 
+    // Usamos THEORY importado
     const mNotes = THEORY.getMelodyNotes(metaData.root, metaData.scale);
     const bNotes = THEORY.getBassNotes(metaData.root, metaData.scale);
 
@@ -194,6 +94,7 @@ export default function App() {
     if (memoryRef.current.bestGenomes.length > 0) {
       pop = Array(30).fill().map(() => {
         const p = memoryRef.current.bestGenomes[Math.floor(Math.random() * memoryRef.current.bestGenomes.length)];
+        // Usamos CompositionDNA importado
         const c = new CompositionDNA(p.melodyGenes.length, mNotes, bNotes);
         c.melodyGenes = JSON.parse(JSON.stringify(p.melodyGenes));
         c.harmonyGenes = JSON.parse(JSON.stringify(p.harmonyGenes));
@@ -314,6 +215,7 @@ export default function App() {
     r.onload = (e) => {
       try {
         if (file.name.endsWith('.mid')) {
+          // Usamos MidiParser importado
           const p = new MidiParser(e.target.result);
           const d = p.parse();
           if (d.rawEvents.length > 0) {
@@ -345,7 +247,7 @@ export default function App() {
 
   const exportUnity = () => {
     if (!currentMelody.length) return;
-    const d = { meta: { bpm: metaData.bpm, structure: metaData.structure }, melody: currentMelody.map(n => ({ note: n.note, duration: n.duration, velocity: n.velocity })) };
+    const d = { qc: { bpm: metaData.bpm, structure: metaData.structure }, melody: currentMelody.map(n => ({ note: n.note, duration: n.duration, velocity: n.velocity })) };
     const b = new Blob([JSON.stringify(d)], { type: 'application/json' });
     const u = URL.createObjectURL(b);
     const a = document.createElement('a'); a.href = u; a.download = `Unity_Song_${Date.now()}.json`; a.click();
@@ -364,7 +266,7 @@ export default function App() {
               <Music4 size={24} />
             </div>
             <div>
-              <h1 className="text-2xl font-bold tracking-tight">NeuroComposer <span className="text-sm font-medium text-gray-400 ml-2">v14 UI</span></h1>
+              <h1 className="text-2xl font-bold tracking-tight">NeuroComposer <span className="text-sm font-medium text-gray-400 ml-2">v14 Modular</span></h1>
               <div className="flex items-center gap-2 mt-1">
                 <div className={`w-2 h-2 rounded-full ${isPlaying ? 'bg-green-500 animate-pulse' : 'bg-gray-300'}`}></div>
                 <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">{isPlaying ? 'REPRODUCIENDO' : 'EN ESPERA'}</span>
